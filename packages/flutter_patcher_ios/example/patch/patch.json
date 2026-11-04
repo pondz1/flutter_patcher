@@ -1,0 +1,19 @@
+{
+  "version": "demo-fix-1",
+  "host": {
+    "appId": "com.example.patch_demo",
+    "version": "1.0.0",
+    "buildNumber": "1",
+    "apiId": "demo-api-1"
+  },
+  "program": "patch.evc",
+  "sources": {"patch": {"main.dart": "main.dart"}},
+  "entrypoints": {
+    "title": {"library": "package:patch/main.dart", "function": "title", "argumentModes": ["boxed"]},
+    "view": {"library": "package:patch/main.dart", "function": "view"}
+  },
+  "assets": {
+    "data/labels.json": "labels.json",
+    "images/patch_demo.png": "patch_demo.png"
+  }
+}

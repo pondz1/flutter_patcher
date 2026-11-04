@@ -1,0 +1,9 @@
+.dart_tool/
+.flutter-plugins-dependencies
+build/
+pubspec.lock
+dist/
+dist-ios/
+*.seed
+example/patch/patch.evc
+example/patch/patch.evc.next

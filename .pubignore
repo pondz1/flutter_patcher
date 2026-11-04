@@ -33,6 +33,7 @@ example/tools/
 # Workspace scratch space (per global rules)
 plan/
 temp/
+packages/
 
 # OS junk
 .DS_Store

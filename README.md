@@ -1,5 +1,15 @@
 # flutter_patcher
 
+## iOS support in this fork
+
+This fork includes an optional experimental companion,
+[`flutter_patcher_ios`](packages/flutter_patcher_ios/README.md), for self-hosted
+signed Dart bytecode and asset updates on prepared Flutter entrypoints. It is
+separate from the Android AOT API documented below. It requires shipping an
+interpreter in the base app and does not patch arbitrary existing AOT code.
+Physical iPhone release verification remains outstanding. Host-app and backend
+integration are outside this package.
+
 **English** | [简体中文](README-zh.md)
 
 [![pub package](https://img.shields.io/pub/v/flutter_patcher.svg)](https://pub.dev/packages/flutter_patcher)
@@ -27,8 +37,7 @@ If you've used [Shorebird](https://shorebird.dev/), [CodePush](https://learn.mic
 | Cost           | Free (MIT)               | Free tier + paid plans        | —                             |
 | Self-hostable  | Yes — full control       | Cloud-managed                 | —                             |
 
-**Choose Shorebird** if you need iOS support or a fully managed service.
-**Choose flutter_patcher** if you need self-hosted OTA updates on infrastructure you control — enterprise apps, regional distribution, or non-Play channels.
+For iOS in this fork, see the [optional interpreter companion](packages/flutter_patcher_ios/README.md) and its explicit patch-scope restrictions. The Android package documented here provides self-hosted OTA updates on infrastructure you control.
 
 > Google Play and some stores restrict downloading executable code at runtime. flutter_patcher targets self-controlled, enterprise, or permissive distribution channels. Check your channel's policy before shipping.
 

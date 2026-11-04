@@ -1,0 +1,22 @@
+name: flutter_patcher_ios
+description: Self-hosted signed Dart bytecode and asset patches for prepared Flutter entrypoints on iOS.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+  flutter: '>=3.47.1'
+dependencies:
+  flutter:
+    sdk: flutter
+  archive: 4.6.0
+  args: ^2.7.0
+  crypto: ^3.0.7
+  cryptography: ^2.7.0
+  dart_eval: 0.8.5
+  flutter_eval:
+    path: vendor/flutter_eval
+  path_provider: ^2.1.5
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

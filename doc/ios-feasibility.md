@@ -1,10 +1,10 @@
 # iOS code and asset OTA: feasibility and proposed scope
 
-Status: research and proposal, not implemented. The user has confirmed both Dart
+Status: historical research; plugin-only implementation is being verified in
+`packages/flutter_patcher_ios`. The user has confirmed both Dart
 code and assets for Flutter host apps, using a self-hosted server with no hosted
-code-push subscription. The proposed interpreter integration and its patch-scope
-restrictions still require review; choosing self-hosting does not establish
-acceptance of restricted code coverage.
+code-push subscription and subsequently approved the prepared-entrypoint design,
+with host-app integration deferred.
 
 ## Existing implementation
 
@@ -111,7 +111,11 @@ failed before test execution: `$Container implements Container` is missing
 `Container.isAntiAlias`, present in the installed Flutter SDK. This is a
 reproduced compiler compatibility failure, not evidence that code push works.
 The candidate runtime must be adapted and retested before app integration.
-No upstream runtime source has been patched in this investigation.
+That failure was the baseline. The companion now contains a licensed vendored
+Flutter bridge with a Container.isAntiAlias compatibility adaptation and an
+additional behavior test. Its 17 upstream/compatibility tests have passed on the
+installed SDK. App/backend integration and physical iPhone verification remain
+outside the completed evidence.
 
 ## Sources
 
