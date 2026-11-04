@@ -40,6 +40,20 @@ publishing a patch for it. Current verification SDK: Flutter 3.47.1 / Dart 3.13.
 The bridge sources and original BSD license are in `vendor/flutter_eval/`.
 Compiler and runtime use exactly dart_eval 0.8.5 and the same bridge revision.
 
+**Release builds must disable icon font tree shaking.** The interpreter's
+IconData bridge constructs icons dynamically; Flutter cannot determine the
+complete glyph set from the base app. For example:
+
+```sh
+flutter build ios --release --no-tree-shake-icons
+# For the store archive:
+flutter build ipa --release --no-tree-shake-icons
+```
+
+Use the same flag for other release targets that include this companion.
+This preserves the full icon fonts needed by future patches. The ordinary
+release command without the flag fails Flutter's icon-tree-shaker check.
+
 ## Bootstrap and explicit entrypoints
 
 ```dart
