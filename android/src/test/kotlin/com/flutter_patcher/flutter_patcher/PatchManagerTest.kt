@@ -1,18 +1,161 @@
 package com.flutter_patcher.flutter_patcher
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.util.Base64
+import android.util.Log
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import java.io.File
+import java.security.KeyPairGenerator
+import java.security.Signature
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import io.flutter.plugin.common.StandardMessageCodec
 import org.json.JSONArray
 import org.json.JSONObject
 import org.mockito.Mockito
 
 class PatchManagerTest {
+    @Test
+    fun signedAssetPackageColdStartChecksMergedDirectoryManifestAndLoadedArchive() {
+        for (tamper in listOf("none", "overlay", "base", "manifest", "archive", "asset-flag")) {
+            val root = tempDir()
+            val key = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+            val context = authenticatedContext(root,
+                java.util.Base64.getEncoder().encodeToString(key.public.encoded))
+            val baseManifest = codecBufferToByteArray(StandardMessageCodec.INSTANCE
+                .encodeMessage(linkedMapOf("base.txt" to listOf(mapOf("asset" to "base.txt"))))!!)
+            fun writeZip(file: File, entries: Map<String, ByteArray>) {
+                ZipOutputStream(file.outputStream()).use { zip ->
+                    for ((path, bytes) in entries) {
+                        zip.putNextEntry(ZipEntry(path)); zip.write(bytes); zip.closeEntry()
+                    }
+                }
+            }
+            writeZip(File(root, "host.apk"), mapOf(
+                "assets/flutter_assets/AssetManifest.bin" to baseManifest,
+                "assets/flutter_assets/base.txt" to "trusted base".toByteArray()))
+            val library = "library".toByteArray()
+            val overlay = "new image".toByteArray()
+            fun md5(bytes: ByteArray) = java.security.MessageDigest.getInstance("MD5")
+                .digest(bytes).joinToString("") { "%02x".format(it) }
+            val assets = JSONObject().put("mode", "overlay").put("prefix", "assets/")
+                .put("manifestPatch", "manifest_patch.json").put("files", JSONArray().put(
+                    JSONObject().put("path", "new.txt").put("md5", md5(overlay)).put("size", overlay.size)))
+            val manifest = JSONObject().put("schemaVersion", 2).put("version", "assets-1")
+                .put("targetVersionCode", 42).put("assets", assets).put("lib", JSONObject().put("arm64-v8a",
+                    JSONObject().put("path", "lib/arm64-v8a/libapp.so").put("md5", md5(library))))
+            val operation = JSONObject().put("schemaVersion", 1).put("manifestFormat", "bin")
+                .put("baseManifestSize", baseManifest.size).put("operations", JSONArray().put(
+                    JSONObject().put("op", "upsert").put("key", "new.txt")
+                        .put("variants", JSONArray().put(JSONObject().put("asset", "new.txt")))))
+            val payload = File(root, "source.zip")
+            writeZip(payload, mapOf("manifest.json" to manifest.toString().toByteArray(),
+                "lib/arm64-v8a/libapp.so" to library, "assets/new.txt" to overlay,
+                "manifest_patch.json" to operation.toString().toByteArray()))
+            val digest = SignatureVerifier.md5(payload)
+            val signer = Signature.getInstance("Ed25519")
+            signer.initSign(key.private); signer.update(digest.toByteArray())
+            val signature = java.util.Base64.getEncoder().encodeToString(signer.sign())
+            try {
+                Mockito.mockStatic(Base64::class.java).use { base64 ->
+                    base64.`when`<ByteArray> { Base64.decode(Mockito.anyString(), Mockito.anyInt()) }
+                        .thenAnswer { java.util.Base64.getDecoder().decode(it.getArgument<String>(0)) }
+                    Mockito.mockStatic(Log::class.java).use {
+                        val manager = PatchManager(context, supportedAbis = arrayOf("arm64-v8a"))
+                        assertNull(invokePrivate(manager, "installPackagePatch", payload,
+                            "assets-1", digest, digest, signature, 42L))
+                        val patchDir = File(root, PatcherConfig.PATCH_DIR)
+                        when (tamper) {
+                            "overlay" -> File(patchDir, "flutter_assets/new.txt").writeText("forged")
+                            "base" -> File(patchDir, "flutter_assets/base.txt").writeText("forged")
+                            "manifest" -> File(patchDir, "flutter_assets/AssetManifest.bin").writeText("forged")
+                            "archive" -> File(patchDir, "flutter_assets.apk").writeText("forged")
+                            "asset-flag" -> {
+                                val metadata = File(patchDir, PatcherConfig.META_FILENAME)
+                                metadata.writeText(JSONObject(metadata.readText()).put("hasAssets", false).toString())
+                            }
+                        }
+                        val cold = PatchManager(context, supportedAbis = arrayOf("arm64-v8a"))
+                        if (tamper == "none") assertTrue(cold.getValidPatch() != null)
+                        else assertNull(cold.getValidPatch(), "must reject $tamper tampering")
+                    }
+                }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
+    @Test
+    fun signedPackageSurvivesColdStartAndRejectsTamperedRetainedPayloadAndLibrary() {
+        for (tamper in listOf("none", "library", "payload", "metadata")) {
+            val root = tempDir()
+            val key = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+            val publicKey = java.util.Base64.getEncoder().encodeToString(key.public.encoded)
+            val context = authenticatedContext(root, publicKey)
+            val payload = File(root, "source.zip")
+            val lib = "real fixture library bytes".toByteArray()
+            val libMd5 = java.security.MessageDigest.getInstance("MD5").digest(lib)
+                .joinToString("") { "%02x".format(it) }
+            val manifest = JSONObject().put("schemaVersion", 2).put("version", "signed-1")
+                .put("targetVersionCode", 42).put("lib", JSONObject().put("arm64-v8a",
+                    JSONObject().put("path", "lib/arm64-v8a/libapp.so").put("md5", libMd5)))
+            ZipOutputStream(payload.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("manifest.json")); zip.write(manifest.toString().toByteArray()); zip.closeEntry()
+                zip.putNextEntry(ZipEntry("lib/arm64-v8a/libapp.so")); zip.write(lib); zip.closeEntry()
+            }
+            val md5 = SignatureVerifier.md5(payload)
+            val signer = Signature.getInstance("Ed25519")
+            signer.initSign(key.private); signer.update(md5.toByteArray())
+            val signature = java.util.Base64.getEncoder().encodeToString(signer.sign())
+            try {
+                Mockito.mockStatic(Base64::class.java).use { base64 ->
+                    base64.`when`<ByteArray> { Base64.decode(Mockito.anyString(), Mockito.anyInt()) }
+                        .thenAnswer { java.util.Base64.getDecoder().decode(it.getArgument<String>(0)) }
+                    Mockito.mockStatic(Log::class.java).use {
+                        val manager = PatchManager(context, supportedAbis = arrayOf("arm64-v8a"))
+                        assertNull(invokePrivate(manager, "installPackagePatch", payload,
+                            "signed-1", md5, md5, signature, 42L))
+                        val patchDir = File(root, PatcherConfig.PATCH_DIR)
+                        if (tamper == "library") File(patchDir, PatcherConfig.PATCH_FILENAME).writeText("tampered")
+                        if (tamper == "payload") File(patchDir, "authenticated/$md5.zip").writeText("tampered")
+                        if (tamper == "metadata") {
+                            val metadata = File(patchDir, PatcherConfig.META_FILENAME)
+                            val json = JSONObject(metadata.readText()).put("effectiveMd5", libMd5).put("version", "forged")
+                            metadata.writeText(json.toString())
+                        }
+                        val coldStart = PatchManager(context, supportedAbis = arrayOf("arm64-v8a"))
+                        if (tamper == "none") assertTrue(coldStart.getValidPatch() != null)
+                        else assertNull(coldStart.getValidPatch(), "must reject $tamper tampering")
+                    }
+                }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
+    private fun authenticatedContext(root: File, publicKey: String): Context {
+        val context = mockContext(root)
+        val prefs = Mockito.mock(SharedPreferences::class.java)
+        Mockito.`when`(context.getSharedPreferences(PatcherConfig.PREFS_NAME, Context.MODE_PRIVATE)).thenReturn(prefs)
+        Mockito.`when`(prefs.getString("public_key_base64", "")).thenReturn(publicKey)
+        Mockito.`when`(prefs.getBoolean("strict_signature", true)).thenReturn(true)
+        val packages = Mockito.mock(PackageManager::class.java)
+        Mockito.`when`(context.packageManager).thenReturn(packages)
+        Mockito.`when`(context.packageName).thenReturn("example.host")
+        val info = PackageInfo(); info.versionCode = 42
+        Mockito.`when`(packages.getPackageInfo("example.host", 0)).thenReturn(info)
+        val application = ApplicationInfo()
+        application.sourceDir = File(root, "host.apk").path
+        Mockito.`when`(context.applicationInfo).thenReturn(application)
+        return context
+    }
+
     @Test
     fun validatePatchArgsAcceptsValidFullPatch() {
         val result = PatchManager.validatePatchArgs(

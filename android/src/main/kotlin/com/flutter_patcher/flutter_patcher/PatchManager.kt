@@ -11,6 +11,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.security.MessageDigest
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
@@ -49,7 +51,8 @@ internal fun codecBufferToByteArray(buffer: ByteBuffer): ByteArray {
 
 internal class PatchManager(
     private val context: Context,
-    private val progress: ProgressCallback? = null
+    private val progress: ProgressCallback? = null,
+    private val supportedAbis: Array<String> = Build.SUPPORTED_ABIS ?: emptyArray()
 ) {
     companion object {
         private const val TAG = "FlutterPatcher/Mgr"
@@ -238,9 +241,11 @@ internal class PatchManager(
             return null
         }
 
-        val verifyResult = SignatureVerifier.verifyDetailed(
-            patchFile, expectedMd5, signature, publicKey, strictSignature
-        )
+        val verifyResult = if (meta.has("payloadMd5")) {
+            verifyRetainedPackage(meta, publicKey, strictSignature)
+        } else {
+            SignatureVerifier.verifyDetailed(patchFile, expectedMd5, signature, publicKey, strictSignature)
+        }
         if (verifyResult != SignatureVerifier.VerifyResult.OK) {
             val status = when (verifyResult) {
                 SignatureVerifier.VerifyResult.MD5_MISMATCH ->
@@ -522,16 +527,19 @@ internal class PatchManager(
                     "package targetVersionCode=$packageTargetVc does not match current=$targetVersionCode"
                 )
             }
+            if (packageManifest.optString("version") != version) {
+                return ApplyResult.failure(ApplyErrorCode.INVALID_ARGS, "package version mismatch")
+            }
 
             val lib = packageManifest.optJSONObject("lib")
                 ?: return ApplyResult.failure(
                     ApplyErrorCode.ASSET_PACKAGE_INVALID,
                     "patch.zip manifest missing lib map"
                 )
-            val abi = selectPackageAbi(lib, Build.SUPPORTED_ABIS)
+            val abi = selectPackageAbi(lib, supportedAbis)
                 ?: return ApplyResult.failure(
                     ApplyErrorCode.UNSUPPORTED_ABI,
-                    "no libapp.so for device ABI ${Build.SUPPORTED_ABIS.joinToString(",")}"
+                    "no libapp.so for device ABI ${supportedAbis.joinToString(",")}"
                 )
             val libInfo = lib.optJSONObject(abi)
                 ?: return ApplyResult.failure(
@@ -574,7 +582,8 @@ internal class PatchManager(
                     put("hasAssets", false)
                     put("installed_at", System.currentTimeMillis())
                 }
-                return finalizePatch(stagedSo, null, null, meta)
+                retainAuthenticatedPayload(payload, effectiveMd5)
+                return finishPackageInstall(stagedSo, null, null, meta)
             }
             if (assets!!.optString("mode") != "overlay") {
                 return ApplyResult.failure(
@@ -612,7 +621,8 @@ internal class PatchManager(
                 put("assetMode", "overlay")
                 put("installed_at", System.currentTimeMillis())
             }
-            return finalizePatch(stagedSo, stagingAssets, stagedAssetsArchive, meta)
+            retainAuthenticatedPayload(payload, effectiveMd5)
+            return finishPackageInstall(stagedSo, stagingAssets, stagedAssetsArchive, meta)
             }
         } catch (e: PatchInstallException) {
             ApplyResult.failure(e.code, e.message)
@@ -642,6 +652,139 @@ internal class PatchManager(
                 e.message ?: "invalid patch package"
             )
         }
+    }
+
+    /** Immutable payloads stay outside staging so recovery can restore either
+     * generation's metadata without losing its authenticated source package. */
+    private fun retainAuthenticatedPayload(payload: File, md5: String) {
+        if (!MD5_HEX.matches(md5)) throw IOException("invalid authenticated payload digest")
+        val target = File(patchDir, "authenticated/${md5.lowercase()}.zip")
+        val pending = File(target.parentFile, "${target.name}.pending")
+        copyFile(payload, pending)
+        if (!pending.renameTo(target)) {
+            pending.delete()
+            throw IOException("cannot retain authenticated payload")
+        }
+    }
+
+    private fun finishPackageInstall(so: File, assets: File?, archive: File?, meta: JSONObject): ApplyResult? {
+        val result = finalizePatch(so, assets, archive, meta)
+        val activeDigest = readMeta()?.optString("payloadMd5", "")?.lowercase()
+        File(patchDir, "authenticated").listFiles()?.forEach { file ->
+            if (file.name != "$activeDigest.zip") file.delete()
+        }
+        return result
+    }
+
+    private fun sha256(input: InputStream): ByteArray = input.use {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(8192)
+        while (true) {
+            val count = it.read(buffer)
+            if (count < 0) break
+            if (count > 0) digest.update(buffer, 0, count)
+        }
+        digest.digest()
+    }
+
+    /** Authenticate the original ZIP, then derive every loaded artifact from
+     * that ZIP and the installed APKs. Local metadata hashes are never treated
+     * as an authenticated inventory. */
+    private fun verifyRetainedPackage(meta: JSONObject, key: String, strict: Boolean): SignatureVerifier.VerifyResult {
+        val md5 = meta.optString("payloadMd5", "")
+        if (!MD5_HEX.matches(md5)) return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+        val payload = File(patchDir, "authenticated/${md5.lowercase()}.zip")
+        if (!payload.isFile) return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+        val verified = SignatureVerifier.verifyDetailed(payload, md5,
+            meta.optString("payloadSignature", ""), key, strict)
+        if (verified != SignatureVerifier.VerifyResult.OK) return verified
+        val scratch = File(patchDir, "verification")
+        return try {
+            ZipFile(payload).use { zip ->
+                val manifest = readZipJson(zip, "manifest.json")
+                    ?: return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+                if (manifest.optInt("schemaVersion") != 2 ||
+                    manifest.optString("version") != meta.optString("version") ||
+                    manifest.optLong("targetVersionCode", -1) != meta.optLong("targetVersionCode", -2)) {
+                    return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+                }
+                val lib = manifest.getJSONObject("lib")
+                val abi = selectPackageAbi(lib, supportedAbis)
+                    ?: return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+                val path = lib.getJSONObject(abi).getString("path")
+                val libEntry = zip.getEntry(path)
+                    ?: return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+                if (!isSafeZipPath(path) || !sha256(zip.getInputStream(libEntry))
+                        .contentEquals(sha256(patchFile.inputStream()))) {
+                    return SignatureVerifier.VerifyResult.MD5_MISMATCH
+                }
+                val assets = manifest.optJSONObject("assets")
+                val hasAssets = !isDartOnlyAssets(assets)
+                if (hasAssets != meta.optBoolean("hasAssets", false)) {
+                    return SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+                }
+                if (hasAssets && !verifyAuthenticatedAssets(zip, assets!!, scratch)) {
+                    return SignatureVerifier.VerifyResult.MD5_MISMATCH
+                }
+                SignatureVerifier.VerifyResult.OK
+            }
+        } catch (_: Exception) {
+            SignatureVerifier.VerifyResult.SIGNATURE_INVALID
+        } finally { scratch.deleteRecursively() }
+    }
+
+    private fun verifyAuthenticatedAssets(zip: ZipFile, assets: JSONObject, scratch: File): Boolean {
+        scratch.deleteRecursively()
+        scratch.mkdirs()
+        val expected = linkedMapOf<String, ByteArray>()
+        for (apkPath in installedApkPaths()) {
+            ZipFile(apkPath).use { apk ->
+                val entries = apk.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (entry.isDirectory || !entry.name.startsWith(FLUTTER_ASSETS_PREFIX)) continue
+                    val relative = entry.name.removePrefix(FLUTTER_ASSETS_PREFIX)
+                    if (!isSafeZipPath(relative)) return false
+                    expected[relative] = sha256(apk.getInputStream(entry))
+                    if (relative == ASSET_MANIFEST) extractZipEntry(apk, entry, File(scratch, ASSET_MANIFEST))
+                }
+            }
+        }
+        val prefix = assets.optString("prefix", "assets/")
+        val files = assets.getJSONArray("files")
+        for (index in 0 until files.length()) {
+            val path = files.getJSONObject(index).getString("path")
+            if (!isSafeZipPath(path)) return false
+            val entry = zip.getEntry("$prefix$path") ?: return false
+            expected[path] = sha256(zip.getInputStream(entry))
+            if (path == ASSET_MANIFEST) extractZipEntry(zip, entry, File(scratch, ASSET_MANIFEST))
+        }
+        applyManifestPatch(zip, assets, scratch)
+        expected[ASSET_MANIFEST] = sha256(File(scratch, ASSET_MANIFEST).inputStream())
+        if (!assetsDir.isDirectory || !assetsArchive.isFile) return false
+        val actual = assetsDir.walkTopDown().filter { it.isFile }.toList()
+        if (actual.size != expected.size) return false
+        val root = assetsDir.canonicalFile
+        for (file in actual) {
+            val path = file.relativeTo(assetsDir).invariantSeparatorsPath
+            if (file.canonicalPath != File(root, path).absolutePath) return false
+            val wanted = expected[path] ?: return false
+            if (!wanted.contentEquals(sha256(file.inputStream()))) return false
+        }
+        ZipFile(assetsArchive).use { archive ->
+            val seen = mutableSetOf<String>()
+            val entries = archive.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory || !entry.name.startsWith(PATCH_ASSETS_PREFIX)) return false
+                val path = entry.name.removePrefix(PATCH_ASSETS_PREFIX)
+                if (!seen.add(path)) return false
+                val wanted = expected[path] ?: return false
+                if (!wanted.contentEquals(sha256(archive.getInputStream(entry)))) return false
+            }
+            if (seen.size != expected.size) return false
+        }
+        return true
     }
 
     private fun resetStaging() {
