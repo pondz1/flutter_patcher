@@ -1,13 +1,9 @@
 package com.flutter_patcher.flutter_patcher
 
-import android.os.Build
 import android.util.Base64
 import android.util.Log
 import java.io.File
-import java.security.KeyFactory
 import java.security.MessageDigest
-import java.security.Signature
-import java.security.spec.X509EncodedKeySpec
 
 /**
  * 补丁文件完整性与签名校验。
@@ -15,12 +11,10 @@ import java.security.spec.X509EncodedKeySpec
  * 策略：
  * - MD5 校验：始终执行（来自 [com.flutter_patcher.flutter_patcher.PatchInfo.md5]）
  * - Ed25519 签名：
- *   - signature 为空 → 跳过（仅靠 MD5 + 传输层防篡改）
- *   - signature 非空 且 API >= 33 → 使用 JDK 原生 Ed25519 验签
- *   - signature 非空 且 API < 33：
- *     - strictSignature=true（默认安全） → **拒绝加载**，防止攻击者通过降级到低
- *       版本设备绕过签名校验
- *     - strictSignature=false → 跳过验签（调用方显式选择降级）
+ *   - publicKey 未配置且 signature 为空 → 兼容旧的无签名模式。
+ *   - publicKey 已配置 → MD5 与签名均为必填项，缺失则拒绝。
+ *   - signature 非空 → 使用 Bouncy Castle 轻量 Ed25519 API，支持所有 minSdk 设备。
+ *     strictSignature 参数保留兼容性；不再因 Android 版本跳过验签。
  *
  * 签名的消息体约定为 **MD5 小写 hex 字符串的 UTF-8 字节**，
  * 与 Dart 侧 PatchInfo.signature 含义保持一致。
@@ -46,14 +40,14 @@ internal object SignatureVerifier {
     /**
      * 仅校验 Ed25519 签名（调用方已确认 MD5 匹配）。
      *
-     * - signature 为空 → 跳过返回 true
+     * - signature 为空且公钥未配置 → 兼容旧模式返回 true
+     * - signature 为空但公钥已配置 → 拒绝
      * - signature 非空但 publicKey 未配置 → 拒绝
-     * - API < 33 且 strictSignature=true → 拒绝（防止降级攻击）
-     * - API < 33 且 strictSignature=false → 跳过返回 true
-     * - API >= 33 → 真实 Ed25519 验签
+     * - 所有支持的 Android API → 真实 Ed25519 验签，失败则拒绝。
      *
      * @param md5HexLower 已匹配并**小写化**的 md5 hex 字符串（作为签名消息体）
      */
+    @Suppress("UNUSED_PARAMETER")
     fun verifySignatureOnly(
         md5HexLower: String,
         signatureBase64: String,
@@ -62,28 +56,16 @@ internal object SignatureVerifier {
     ): Boolean {
         val sig = signatureBase64.trim()
         if (sig.isEmpty() || sig.equals("null", ignoreCase = true)) {
+            if (publicKeyBase64.isNotBlank()) {
+                Log.w(TAG, "public key configured but signature missing, reject")
+                return false
+            }
             Log.d(TAG, "signature empty, skip Ed25519 check")
             return true
         }
         if (publicKeyBase64.isEmpty()) {
             Log.w(TAG, "signature present but no public key configured, reject")
             return false
-        }
-
-        if (Build.VERSION.SDK_INT < 33) {
-            if (strictSignature) {
-                Log.e(
-                    TAG,
-                    "API ${Build.VERSION.SDK_INT} < 33, Ed25519 not supported; strict mode rejects. " +
-                        "Pass strictSignature=false to FlutterPatcher.init to downgrade (NOT recommended)."
-                )
-                return false
-            }
-            Log.w(
-                TAG,
-                "API ${Build.VERSION.SDK_INT} < 33, Ed25519 not supported; strictSignature=false, skip"
-            )
-            return true
         }
 
         return try {
@@ -103,8 +85,8 @@ internal object SignatureVerifier {
     /**
      * 完整校验（细粒度版本）：MD5 + 可选 Ed25519。返回失败原因分类。
      *
-     * 注意：[expectedMd5] 为空时整体跳过 MD5 与签名校验，直接返回
-     * [VerifyResult.OK]（调用方明确选择"不下发 md5"，仅依赖 HTTPS）。
+     * 注意：[expectedMd5] 为空且公钥未配置时，兼容旧的无签名模式。
+     * 公钥已配置时，[expectedMd5] 为空则拒绝。
      * 启动路径目前仍依赖 meta.effectiveMd5 非空，故启动期不会走到这条分支；
      * 该分支主要服务于 [PatchManager.applyPatch] 期间的重复使用。
      */
@@ -116,6 +98,10 @@ internal object SignatureVerifier {
         strictSignature: Boolean = true
     ): VerifyResult {
         if (expectedMd5.isEmpty()) {
+            if (publicKeyBase64.isNotBlank() || signatureBase64.isNotBlank()) {
+                Log.w(TAG, "authenticated patch requires expected md5, reject")
+                return VerifyResult.SIGNATURE_INVALID
+            }
             Log.w(TAG, "expected md5 empty, skip md5 & signature verify")
             return VerifyResult.OK
         }
@@ -144,7 +130,7 @@ internal object SignatureVerifier {
      * @param expectedMd5      manifest 中的预期 MD5（小写 hex）
      * @param signatureBase64  manifest 中的 Ed25519 签名（Base64，允许为空）
      * @param publicKeyBase64  X.509 SubjectPublicKeyInfo 的 Base64 公钥（允许为空）
-     * @param strictSignature  API < 33 是否拒绝签名校验（默认 true，安全）
+     * @param strictSignature  保留兼容性；所有支持设备均真实验签。
      * @return 是否通过校验
      */
     fun verify(
@@ -163,15 +149,7 @@ internal object SignatureVerifier {
         publicKeyBase64: String
     ): Boolean {
         val pkBytes = Base64.decode(publicKeyBase64, Base64.NO_WRAP)
-        val keySpec = X509EncodedKeySpec(pkBytes)
-        val kf = KeyFactory.getInstance("Ed25519")
-        val pk = kf.generatePublic(keySpec)
-
-        val sig = Signature.getInstance("Ed25519")
-        sig.initVerify(pk)
-        sig.update(md5Hex.toByteArray(Charsets.UTF_8))
-
         val sigBytes = Base64.decode(signatureBase64, Base64.NO_WRAP)
-        return sig.verify(sigBytes)
+        return Ed25519Verifier.verify(md5Hex.toByteArray(Charsets.UTF_8), sigBytes, pkBytes)
     }
 }

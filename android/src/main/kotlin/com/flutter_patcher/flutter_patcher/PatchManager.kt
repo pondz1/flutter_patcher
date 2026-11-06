@@ -341,6 +341,16 @@ internal class PatchManager(
             )
         }
 
+        // Configuring a key opts into authenticated delivery. Do not let an
+        // omitted digest select the legacy branch that skips authentication.
+        if (md5.isBlank() &&
+            (PatcherConfig.publicKey(context).isNotBlank() || signature.isNotBlank())) {
+            return ApplyResult.failure(
+                ApplyErrorCode.SIGNATURE_INVALID,
+                "authenticated patch requires expected md5"
+            )
+        }
+
         val blacklistHit = if (md5.isBlank()) {
             BlacklistStore.containsByVersion(context, version)
         } else {

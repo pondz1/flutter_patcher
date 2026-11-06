@@ -88,6 +88,9 @@ android {
     }
 
     dependencies {
+        // Lightweight API: no global provider registration and no API 33 gate.
+        // Java 1.5-1.8 distribution avoids multi-release JAR packaging on Android.
+        implementation("org.bouncycastle:bcprov-jdk15to18:1.86")
         testImplementation("org.jetbrains.kotlin:kotlin-test")
         testImplementation("org.json:json:20240303")
         testImplementation("org.mockito:mockito-core:5.0.0")
