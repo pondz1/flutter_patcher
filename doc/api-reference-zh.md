@@ -40,9 +40,9 @@ await FlutterPatcher.init(
 
 | 参数                        | 说明                         |
 | ------------------------- | -------------------------- |
-| `publicKeyBase64`         | Ed25519 公钥。`PatchInfo.signature` 为空时跳过签名校验；补丁带签名但未配置公钥会拒绝应用 |
+| `publicKeyBase64`         | Base64 编码的 X.509 SubjectPublicKeyInfo Ed25519 公钥。配置后必须同时提供非空 `PatchInfo.md5` 和 `PatchInfo.signature`；有签名却未配置公钥会被拒绝。未配置公钥且未提供签名时，仍保留旧版无签名行为 |
 | `maxCrashCount`           | 连续崩溃多少次后熔断补丁，默认 `1`        |
-| `strictSignature`         | API < 33（无 JDK 原生 Ed25519）遇到带签名补丁时是否拒绝应用；API ≥ 33 时该开关无影响，永远走原生校验 |
+| `strictSignature`         | 保留用于兼容，默认 `true`。所有受支持 Android 版本（API 24+）均使用 Bouncy Castle 验签，即使设为 `false` 也不会跳过 |
 | `loaderFieldCandidates`   | FlutterLoader 字段名候选，一般无需修改 |
 | `loaderFallbackHeuristic` | 候选字段失败后是否启用兜底扫描            |
 | `verifyAfter`             | 启动后用于判断补丁稳定的保护窗口           |
@@ -366,8 +366,8 @@ final map = patch.toJson();
 | ------------------- | ---------------------- | --------- | ------------------------- |
 | `version`           | `String`               | 是         | 补丁版本标识，自定义字符串             |
 | `patchUrl`          | `String`               | 是         | 补丁下载地址                    |
-| `md5`               | `String`               | 否         | 补丁文件 MD5，小写 32 位 hex；为空字符串时跳过 MD5 校验（同时签名校验也会一并跳过） |
-| `signature`         | `String`               | 否         | Ed25519 签名，Base64。为空时跳过验签。仅在 `md5` 非空时生效 |
+| `md5`               | `String`               | 配置公钥或提供签名时必填 | 载荷 MD5，小写 32 位 hex；仅在无公钥且无签名时可省略 |
+| `signature`         | `String`               | 配置公钥时必填 | 对小写 MD5 hex 字符串 UTF-8 字节的 Ed25519 签名，Base64；必须同时提供 `md5` 并配置公钥 |
 | `targetVersionCode` | `int?`                 | 推荐        | 补丁适用的宿主 APK `versionCode` |
 | `raw`               | `Map<String, dynamic>` | 否         | `fromJson` 保留的原始字段        |
 
@@ -500,7 +500,7 @@ assets/<asset-path>    # 覆盖字节，每个 path（及每个分辨率变体�
 | `key`      | 在 `pubspec.yaml` `assets:` 下登记的 Flutter 资源路径             |
 | `variants` | 自动从补丁版 APK 的 Flutter 资源表中读取的分辨率变体（`1.0x`、`2.0x` 等）       |
 
-**安装阶段**（不是冷启动）插件把这些 op 合并进 APK 的基准资源表，把合并后的资源表与覆盖文件一起写到补丁的私有目录，并打成一个私有 `flutter_assets.apk`。冷启动时 [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) 安装一个 patched `FlutterLoader` + `FlutterJNI` AssetManager，把 Flutter 的资源读取重定向到补丁目录；补丁没动过的 path 仍走 APK fallback。
+**安装阶段**插件把这些 op 合并进 APK 的基准资源表，把合并后的资源表与覆盖文件一起写到补丁的私有目录，并打成一个私有 `flutter_assets.apk`。冷启动会在临时校验目录中重算预期资源表、检查已安装产物，再由 [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) 安装 patched `FlutterLoader` + `FlutterJNI` AssetManager。校验不会重写已安装的资源目录或归档。
 
 ### 资源路径要求
 
@@ -531,9 +531,11 @@ assets/<asset-path>    # 覆盖字节，每个 path（及每个分辨率变体�
 
 服务端下发响应里的整包 MD5 / 签名覆盖整个 `patch.zip`。内层逐文件 MD5 仅作为解包阶段的完整性校验，不是独立的安全面 —— 生产环境务必启用外层签名。
 
+安装后会保留原始 ZIP 用于冷启动认证，增加相当于 ZIP 大小的本地磁盘占用。配置公钥后，所有受支持 Android 版本（API 24+）均会拒绝缺少 MD5 或签名的补丁。
+
 ### 各阶段做了什么
 
-`applyPatch` 阶段做所有重活，冷启动只校验和加载。具体：
+`applyPatch` 构建安装产物；冷启动认证并校验这些产物后才加载。具体：
 
 **`applyPatch` 调用期间（安装阶段）：**
 
@@ -541,12 +543,13 @@ assets/<asset-path>    # 覆盖字节，每个 path（及每个分辨率变体�
 2. 打开 ZIP，校验内层 `schemaVersion` 与逐文件 MD5。
 3. 把 `lib/<abi>/libapp.so` 解压到 staging。
 4. 如果补丁带资源：把 APK 的 `flutter_assets/` 拷到 staging、按内层 manifest 列出的 path 逐个 overlay、把 overlay 操作合并进资源表、然后把结果打成一个私有 `flutter_assets.apk`。
-5. 把 staging 的产物原子地提交到 `current/`（详见 [架构 → Atomic install](architecture-zh.md#atomic-install)）。
+5. 单独保留原始 ZIP，再原子提交 staging 产物（详见 [架构 → Atomic install](architecture-zh.md#atomic-install)）。
 
 **下一次冷启动：**
 
-1. 校验 `current/` 与宿主 APK 的 `versionCode` 匹配，且磁盘上的 `libapp.so` 仍然与 meta 中的 MD5 一致。
-2. [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) 安装 patched `FlutterLoader` + `FlutterJNI` AssetManager，把 Flutter 指向补丁的 `libapp.so` 与（若有资源）私有 `flutter_assets.apk`。
+1. 校验宿主 `versionCode` 和保留 ZIP 的 MD5 / 签名，再比较已安装库与签名 ZIP 内库文件的 SHA-256。
+2. 资源补丁会根据签名 ZIP 和已安装 APK 推导完整文件清单，在临时校验目录中重算合并后的资源表，并验证合并文件和实际加载的 `flutter_assets.apk` 条目的 SHA-256。这些检查会增加启动 I/O，但不会替换已安装产物。
+3. [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) 安装 patched `FlutterLoader` + `FlutterJNI` AssetManager，把 Flutter 指向补丁的 `libapp.so` 与（若有资源）私有 `flutter_assets.apk`。
 
 如果校验失败，或进程内的崩溃熔断触发，补丁会被丢弃，下次冷启动回退到 APK 内置版本。
 
@@ -558,12 +561,12 @@ assets/<asset-path>    # 覆盖字节，每个 path（及每个分辨率变体�
 
 | 指标       | 影响                                |
 | -------- | --------------------------------- |
-| APK 体积增量 | 约 80–120 KB                       |
-| 启动耗时增量   | 约 5–15 ms                         |
-| 运行时内存    | 补丁加载后无额外常驻占用                      |
+| APK 体积增量 | 包含 Bouncy Castle；当前 release 体积增量尚未测量 |
+| 启动耗时增量   | ZIP 认证与产物哈希；资源补丁还会读取完整文件清单。当前耗时尚未测量 |
+| 运行时内存    | 当前验证器的内存开销尚未测量 |
 | 补丁文件大小   | 通常 5–15 MB                          |
 
-> 以上数据基于 Pixel 6 / Flutter 3.24 测量。实际结果会受设备、Flutter 版本和构建配置影响。
+> 旧版 Pixel 6 / Flutter 3.24 测量不涵盖当前验证器和资源清单校验。请在目标设备上测量当前 release。
 
 ### 支持范围
 

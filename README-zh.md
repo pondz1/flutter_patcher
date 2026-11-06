@@ -38,7 +38,7 @@
 
 - **OTA 热更新** — 下次冷启动时替换 Dart AOT 产物 `libapp.so` 和 Flutter 资源
 - **自托管** — 补丁放在你的 CDN / 对象存储 / 内部服务器，零供应商锁定
-- **完整性校验** — MD5 + 可选 Ed25519 签名（Android 13+）
+- **完整性校验** — MD5 + Ed25519 签名，支持全部受支持 Android 版本（API 24+）
 - **崩溃回滚** — 启动失败自动回滚，问题补丁进入黑名单不会重复加载
 - **配套工具** — `pack` 打包 CLI、运行时诊断、本地 mock server 和示例 App
 
@@ -188,7 +188,7 @@ await FlutterPatcher.rollback();
 ```text
 下载补丁
   ↓
-校验 MD5 / 签名（如有），然后校验 versionCode
+校验 MD5 / 签名（配置公钥后均必填），然后校验 versionCode
   ↓
 写入本地补丁目录
   ↓
@@ -226,8 +226,11 @@ await FlutterPatcher.rollback();
 
 ### 完整性与签名
 
-- 强烈建议下发 **MD5**；仅在快速测试时省略
-- **Ed25519 签名**校验支持 Android 13+（API 33）
+- 配置公钥后，必须同时提供非空 **MD5** 和 **Ed25519 签名**；缺少认证字段会被拒绝
+- 所有受支持 Android 版本（API 24+）均使用 Bouncy Castle 验签；`strictSignature: false` 不会跳过验证
+- 未配置公钥时，仍保留旧版无签名模式，该模式下 MD5 为可选项
+- ZIP 补丁安装后会保留原始 `patch.zip` 用于冷启动认证，增加相当于 ZIP 大小的本地存储占用
+- 冷启动会根据已认证 ZIP 校验已安装库；资源补丁还会根据签名 ZIP 和已安装 APK 校验完整资源文件及实际加载的归档，增加启动 I/O
 - 补丁与宿主 APK `versionCode` 强绑定，APK 升级后旧补丁自动失效
 - 始终通过 HTTPS 下载；私钥只放在服务端
 

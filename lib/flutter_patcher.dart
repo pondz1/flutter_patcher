@@ -85,15 +85,17 @@ class FlutterPatcher {
   /// Call this in `main()` before `runApp()`. The method is idempotent.
   ///
   /// [publicKeyBase64] is an optional X.509 SubjectPublicKeyInfo Ed25519 public
-  /// key in base64. Empty disables signature verification. If [PatchInfo.md5]
-  /// is empty, signature verification is skipped as well because the signed
-  /// message is the md5 hex string.
+  /// key in base64. When configured, patches must provide both a nonempty
+  /// [PatchInfo.md5] and [PatchInfo.signature]. Without a configured key,
+  /// legacy unsigned delivery remains available and MD5 is optional; a patch
+  /// that supplies a signature without a configured key is rejected.
   ///
   /// [maxCrashCount] defaults to `1` (fail-fast). Once a loaded patch causes an
   /// early boot failure, the SDK rolls it back and blacklists the same payload.
   ///
-  /// [strictSignature] rejects signed patches on Android API < 33, where the
-  /// platform Ed25519 implementation is unavailable.
+  /// [strictSignature] is retained for API compatibility. Bouncy Castle verifies
+  /// signed patches on every supported Android version (API 24+), regardless
+  /// of this flag; setting it to false never bypasses verification.
   ///
   /// [loaderFieldCandidates] and [loaderFallbackHeuristic] are advanced Flutter
   /// embedding compatibility controls. Keep defaults unless adapting a new
@@ -190,12 +192,18 @@ class FlutterPatcher {
   /// Flow:
   ///
   /// 1. Download with retry.
-  /// 2. Verify payload md5/signature when provided.
+  /// 2. Verify payload md5/signature; both are required with a configured key.
   /// 3. Install legacy lib-only payload, or parse and install v2 package.
   /// 4. Commit patch files transactionally for the next cold start.
   ///
   /// Returns a [PatchApplyResult]. `ok=true` means the patch is installed and
   /// will take effect on the next cold start.
+  ///
+  /// ZIP patches retain their original payload for cold-start authentication,
+  /// increasing on-device storage by the ZIP size. Cold start verifies the
+  /// installed library against that payload. Asset patches also verify the
+  /// complete merged files and loaded archive against the signed ZIP and host
+  /// APKs, which adds startup I/O.
   static Future<PatchApplyResult> applyPatch(
     PatchInfo patchInfo, {
     void Function(PatchApplyProgress)? onProgress,

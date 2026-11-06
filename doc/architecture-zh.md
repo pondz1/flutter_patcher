@@ -60,7 +60,7 @@ applyPatch（安装阶段）
   ↓
 …等待下次冷启动…
   ↓
-冷启动：校验 current/（versionCode + 磁盘上 libapp.so 的 MD5）
+冷启动：校验 versionCode、保留 ZIP 的签名及实际加载产物的完整性
   ↓
 LoaderHook 把 Flutter 指向补丁 libapp.so
   （若有资源，再指向 flutter_assets.apk）
@@ -69,12 +69,11 @@ LoaderHook 把 Flutter 指向补丁 libapp.so
 启动失败：下次冷启动自动回滚
 ```
 
-重活（完整性校验、资源 overlay 合成、资源表合并、私有归档打包）都发生在 `applyPatch` 内部，并且在调用返回前已经原子提交到 `current/`。冷启动只重新校验磁盘上的产物并装好 loader hook，**不会**重新打开 ZIP 或重跑 overlay 合并。
+资源 overlay 合成和私有归档打包发生在 `applyPatch` 内部，并在调用返回前原子提交。原始 ZIP 会另外保留用于冷启动验签，因此会增加相当于 ZIP 大小的本地存储。冷启动重新打开 ZIP 并验签，再用签名包内的库文件校验已安装的库。资源补丁还会根据签名 ZIP 和已安装 APK 推导完整文件清单，在临时校验目录中重算合并后的资源表，并校验资源目录和实际加载的归档。这些检查会增加启动 I/O，目前尚未测量其耗时。
 
-安装阶段的校验顺序（见 [PatchManager.kt:303-446](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/PatchManager.kt#L303-L446)）：整包 MD5 → Ed25519 签名 → `versionCode` 匹配（对照内层 package manifest）→ ZIP 内逐文件完整性。签名只在 `md5` 存在时才校验（签名的明文就是 md5 十六进制串）。
+安装阶段的校验顺序（见 [PatchManager.kt](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/PatchManager.kt)）：整包 MD5 → Ed25519 签名 → `versionCode` 和补丁版本与内层 manifest 匹配 → ZIP 内逐文件完整性。配置公钥后，MD5 和签名均为必填项；签名明文是小写 MD5 十六进制串的 UTF-8 字节。
 
-冷启动时，插件会重新校验磁盘上的产物是否仍属于当前 APK（`versionCode` 与存储的 MD5），再进行加载。
-如果补丁无效、损坏、版本不匹配，或命中本地黑名单，插件会丢弃该补丁并回到 APK 内置版本。
+冷启动时，插件会校验宿主 `versionCode`、保留 ZIP 的签名，并根据已认证来源验证实际加载产物的 SHA-256。旧版裸库补丁仍使用其 MD5 / 签名元数据。校验失败时，插件丢弃补丁并回到 APK 内置版本。
 
 崩溃保护的完整判定流程、Android 版本差异和黑名单行为见 [Crash protection](crash-protection-zh.md)。
 
@@ -308,7 +307,7 @@ final abi = await FlutterPatcher.deviceAbi;
 
 ### 补丁签名
 
-`flutter_patcher` 支持 Ed25519 签名校验。
+`flutter_patcher` 使用 Bouncy Castle 轻量 Ed25519 验证器，支持全部受支持的 Android 版本（API 24+）。
 
 签名用于在 HTTPS 之外提供额外完整性保护，防止 CDN 或中间链路返回被篡改的补丁。
 
@@ -317,7 +316,7 @@ final abi = await FlutterPatcher.deviceAbi;
 1. 客户端在 `FlutterPatcher.init()` 中配置公钥。
 2. 服务端持有私钥。
 3. 启用签名校验的补丁发布时，服务端对补丁 MD5 进行签名。
-4. 客户端下载补丁后，先校验 MD5，再校验签名。若省略 `md5`，这两项校验会按设计一并跳过。
+4. 客户端下载补丁后，先校验 MD5，再校验签名。配置公钥后，缺少其中任一字段都会拒绝补丁；提供签名却未配置公钥也会被拒绝。
 
 客户端配置公钥：
 
@@ -352,11 +351,7 @@ printf "%s" "0123456789abcdef0123456789abcdef" | \
 
 ### strictSignature
 
-`strictSignature` 默认为 `true`。
-
-在 Android API < 33（无 JDK 原生 Ed25519）的设备上，如果收到带签名的补丁，插件会拒绝加载，而不是静默跳过验签。API ≥ 33 时该开关无影响，永远走原生校验。
-
-这样可以避免“配置了签名，但部分设备实际没有校验”的安全误判。
+`strictSignature` 默认为 `true`，目前保留用于 API 兼容。所有受支持设备（API 24+）都会执行原生 Ed25519 验签，与该参数无关。设置为 `false` 不能绕过验签，也不能在已配置公钥时省略认证字段。
 
 ```dart
 await FlutterPatcher.init(
@@ -365,24 +360,15 @@ await FlutterPatcher.init(
 );
 ```
 
-如果你明确接受低版本设备仅依赖 MD5 + HTTPS，可以设置：
-
-```dart
-await FlutterPatcher.init(
-  publicKeyBase64: 'MCowBQYDK2VwAyEA...',
-  strictSignature: false,
-);
-```
-
 #### 完全省略 MD5（可选）
 
-若服务端协议不下发 md5（仅靠 HTTPS 做完整性保护），可让 `PatchInfo.md5` 留空：
+仅在未配置公钥且未提供签名的旧版无签名模式下，可让 `PatchInfo.md5` 留空：
 
 ```dart
 PatchInfo(version: 'fix-1', patchUrl: 'https://...', targetVersionCode: 100);
 ```
 
-此时下载完整性校验与签名校验**全部跳过**（Ed25519 签名输入即 md5 hex，无 md5 即无签名输入）。要保留签名校验，必须同时下发 md5。原生侧仍会在下载完成后计算实际 md5 写入 `meta.effectiveMd5`，作为运行时稳定键供启动校验和黑名单使用。
+在无公钥模式下，下载 MD5 / 签名校验仍为可选行为。原生侧仍会计算实际载荷 MD5，供本地元数据和黑名单识别使用。配置公钥后必须同时提供 MD5 和签名，省略 MD5 不能绕过验签。
 
 ---
 

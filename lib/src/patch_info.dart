@@ -17,14 +17,18 @@ class PatchInfo {
   /// MD5 of the patch payload, lower-case hex.
   ///
   /// For a lib-only patch this is the MD5 of `libapp.so`. For an asset patch
-  /// this is the MD5 of `patch.zip`. An empty string skips payload MD5
-  /// verification and also skips signature verification.
+  /// this is the MD5 of `patch.zip`. Required when a public key is configured
+  /// or a signature is supplied. With neither a key nor a signature, an empty
+  /// string retains the legacy behavior of skipping download MD5 verification.
   final String md5;
 
   /// Base64 Ed25519 signature over the [md5] hex string.
   ///
-  /// Empty disables signature verification. When [md5] is empty this field is
-  /// ignored because there is no signed message.
+  /// Required when a public key is configured. A supplied signature requires
+  /// both a configured public key and a nonempty [md5]. Verification runs on
+  /// all supported Android versions (API 24+), including when strictSignature
+  /// is false. Leave both the public key and this field empty only for legacy
+  /// unsigned delivery.
   final String signature;
 
   /// Host APK `versionCode` this patch targets.
@@ -175,8 +179,7 @@ enum PatchApplyError {
   /// Payload, lib, or overlay asset MD5 did not match expected metadata.
   md5Mismatch,
 
-  /// Ed25519 verification failed, or strict mode rejected a signed patch on an
-  /// Android version without Ed25519 support.
+  /// Ed25519 verification failed or required authentication was missing.
   signatureInvalid,
 
   /// The patch package has no `libapp.so` for the current device ABI.

@@ -40,13 +40,13 @@ The plugin also ships with an optional minimal check-update JSON protocol, inten
 
 ## Skipping MD5
 
-`PatchInfo.md5` is optional. If your server doesn't ship md5 (or you only want HTTPS-level integrity), leave it out:
+`PatchInfo.md5` is optional only in legacy unsigned mode, when neither a public key nor a signature is configured:
 
 ```dart
 PatchInfo(version: 'fix-1', patchUrl: '...', targetVersionCode: 100); // md5 defaults to ''
 ```
 
-Download integrity checks are skipped. **Note that signature verification is also skipped** in this case (the Ed25519 input is the md5 hex string — without md5 there is no message to sign over). To keep signature verification you must also ship md5.
+In that keyless mode, download MD5/signature verification is skipped when neither value is supplied. Configuring a public key requires both a nonempty MD5 and signature; omitting either rejects the patch. A supplied signature also requires a configured key and MD5. Verification uses Bouncy Castle on every supported Android version (API 24+).
 
 ---
 

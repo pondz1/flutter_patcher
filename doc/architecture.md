@@ -60,7 +60,7 @@ Atomic commit: rename staging artifacts → current/
   ↓
 …wait for the next cold start…
   ↓
-Cold start: validate current/ (versionCode + MD5 of installed libapp.so)
+Cold start: verify versionCode + retained ZIP signature + loaded artifact inventory
   ↓
 LoaderHook redirects Flutter to the patched libapp.so
   (and to flutter_assets.apk if assets are present)
@@ -69,11 +69,11 @@ Boot succeeds: keep using the patch
 Boot fails:    auto-rollback on next start
 ```
 
-The bulk of the work (decryption-free integrity checks, asset overlay synthesis, asset-table merge, private archive packaging) happens during `applyPatch` and is committed to `current/` atomically before the call returns. Cold start only re-validates what's on disk and installs the loader hook; it never reopens the ZIP or re-runs the overlay merge.
+Asset overlay synthesis and private archive packaging happen during `applyPatch` and are committed atomically before the call returns. The original ZIP is retained separately for cold-start authentication, adding the ZIP's size to on-device storage. Cold start reopens and authenticates that ZIP, then compares the installed library against its signed entry. Asset patches also derive the expected complete inventory from the signed ZIP and installed APKs, recompute the merged asset manifest in temporary verification storage, and verify both the merged directory and loaded archive. Verification adds startup I/O; its current cost has not been benchmarked.
 
-Validation order at install (per [PatchManager.kt:303-446](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/PatchManager.kt#L303-L446)): payload MD5 → Ed25519 signature → `versionCode` match (against the inner package manifest) → per-file integrity inside the ZIP. Signature is only checked when `md5` is present (the signed message is the md5 hex string).
+Validation order at install (see [PatchManager.kt](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/PatchManager.kt)): payload MD5 → Ed25519 signature → `versionCode` and patch-version match against the inner package manifest → per-file integrity inside the ZIP. Configuring a public key requires both MD5 and signature; the signed message is the lowercase MD5 hex string encoded as UTF-8.
 
-At cold start the plugin re-verifies that the on-disk artifacts still belong to this APK (`versionCode` and stored MD5) before loading them. If the patch is invalid, corrupt, mismatched, or blacklisted, the plugin drops it and falls back to the APK's built-in version.
+At cold start the plugin verifies the host `versionCode`, retained ZIP authentication, and the loaded artifacts' SHA-256 hashes against their authenticated sources. Legacy bare-library patches use their MD5/signature metadata. If validation fails, the plugin drops the patch and falls back to the APK's built-in version.
 
 For the full crash-protection decision flow, Android-version differences, and blacklist behavior, see [Crash protection](https://pub.dev/documentation/flutter_patcher/latest/topics/Crash-protection-topic.html).
 
@@ -307,7 +307,7 @@ Pass it in the check-update request and have the server return the matching URL.
 
 ### Patch signing
 
-`flutter_patcher` supports Ed25519 signature verification.
+`flutter_patcher` uses Bouncy Castle's lightweight Ed25519 verifier on every supported Android version (API 24+).
 
 Signing provides extra integrity protection beyond HTTPS, in case the CDN or an intermediate hop ever returns a tampered file.
 
@@ -316,7 +316,7 @@ The basic workflow:
 1. The client configures the public key in `FlutterPatcher.init()`.
 2. The server holds the private key.
 3. For every release with signature verification enabled, the server signs the patch MD5.
-4. The client verifies MD5 first, then the signature. If `md5` is omitted, both checks are skipped by design.
+4. The client verifies MD5 first, then the signature. With a configured key, omitting either field rejects the patch. A supplied signature without a configured key is also rejected.
 
 Configure the public key:
 
@@ -351,11 +351,7 @@ Put the resulting signature in the `signature` field of the check-update respons
 
 ### strictSignature
 
-`strictSignature` defaults to `true`.
-
-On Android API < 33 (no JDK Ed25519), if the device receives a signed patch, the plugin **rejects** it instead of silently skipping verification. On API ≥ 33 the flag has no effect — native verification always runs.
-
-This avoids the false sense of security where "we configured signing but some devices don't actually verify".
+`strictSignature` defaults to `true` and remains in the API for compatibility. Native Ed25519 verification runs on every supported device (API 24+), regardless of this flag. Setting it to `false` does not bypass signature checks or permit missing authentication when a key is configured.
 
 ```dart
 await FlutterPatcher.init(
@@ -364,24 +360,15 @@ await FlutterPatcher.init(
 );
 ```
 
-If you explicitly accept that older devices fall back to MD5 + HTTPS only, set:
-
-```dart
-await FlutterPatcher.init(
-  publicKeyBase64: 'MCowBQYDK2VwAyEA...',
-  strictSignature: false,
-);
-```
-
 #### Skipping MD5 entirely (optional)
 
-If your server protocol does not ship `md5` (relying on HTTPS for integrity), leave `PatchInfo.md5` empty:
+Only in legacy unsigned mode, with neither a configured public key nor a supplied signature, may you leave `PatchInfo.md5` empty:
 
 ```dart
 PatchInfo(version: 'fix-1', patchUrl: 'https://...', targetVersionCode: 100);
 ```
 
-In that case **both download integrity and signature verification are skipped** (the Ed25519 input is the md5 hex string — without md5 there is no message to sign over). To keep signature verification, you must ship md5. The native side still computes the actual md5 after download and writes it to `meta.effectiveMd5`, so runtime checks (boot validation and the blacklist) keep a stable key.
+In that keyless mode, download MD5/signature verification remains optional. The native side still computes the actual payload MD5 for local metadata and blacklist identification. Configuring a public key requires both MD5 and signature; omitting MD5 cannot bypass verification.
 
 ---
 

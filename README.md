@@ -47,7 +47,7 @@ For iOS in this fork, see the [optional interpreter companion](packages/flutter_
 
 - **OTA code push** — replace Dart AOT `libapp.so` and Flutter assets on the next cold start
 - **Self-hosted** — patches live on your CDN / object storage / internal server; zero vendor lock-in
-- **Integrity verification** — MD5 checksum + optional Ed25519 signature (Android 13+)
+- **Integrity verification** — MD5 checksum + Ed25519 signatures on all supported Android versions (API 24+)
 - **Crash rollback** — automatic rollback on boot failure with a bad-patch blacklist
 - **Tooling included** — `pack` CLI, runtime diagnostics, local mock server, and sample app
 
@@ -197,7 +197,7 @@ Deletes the current patch. The app reverts to the APK's built-in version on the 
 ```text
 Download patch
   ↓
-Verify MD5 / signature (when provided), then versionCode
+Verify MD5 / signature (required when a key is configured), then versionCode
   ↓
 Persist to local patch directory
   ↓
@@ -235,8 +235,11 @@ Full design and Android version differences: [Crash protection docs](https://pub
 
 ### Integrity & signing
 
-- **MD5** verification is strongly recommended; omit only for quick testing
-- **Ed25519 signature** verification is available on Android 13+ (API 33)
+- Configuring a public key requires a nonempty **MD5** and **Ed25519 signature**; missing authentication is rejected
+- **Ed25519 verification** uses Bouncy Castle on all supported Android versions (API 24+); `strictSignature: false` does not bypass verification
+- Without a configured key, legacy unsigned delivery remains available; MD5 is optional in that mode
+- Installed ZIP patches retain the original `patch.zip` for cold-start authentication, adding its size to on-device storage
+- Cold start compares the installed library against the authenticated ZIP; asset patches also verify the merged files and loaded asset archive against the signed ZIP and installed APKs, adding startup I/O
 - Patches are bound to the host APK's `versionCode` — old patches expire after an APK upgrade
 - Always download over HTTPS; keep private keys on the server only
 

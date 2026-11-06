@@ -40,9 +40,9 @@ await FlutterPatcher.init(
 
 | Parameter | Description |
 | ---  | --- |
-| `publicKeyBase64` | Ed25519 public key. When `PatchInfo.signature` is empty, signature verification is skipped. A patch that ships with a signature but is loaded on a client without a configured public key is rejected. |
+| `publicKeyBase64` | X.509 SubjectPublicKeyInfo Ed25519 public key, base64. A configured key requires nonempty `PatchInfo.md5` and `PatchInfo.signature`. A signature without a configured key is rejected. With no key or signature, legacy unsigned behavior remains available. |
 | `maxCrashCount` | Number of consecutive crashes that trips the patch. Default `1`. |
-| `strictSignature` | On API < 33 (no JDK Ed25519 support), reject signed patches instead of silently skipping verification. On API ≥ 33 the flag has no effect — native verification always runs. |
+| `strictSignature` | Retained for compatibility, default `true`. Bouncy Castle verifies signatures on all supported Android versions (API 24+), even when this flag is `false`. |
 | `loaderFieldCandidates` | Candidate field names used to locate `FlutterLoader`. Rarely needs changing. |
 | `loaderFallbackHeuristic` | If the candidates fail, use a heuristic last-resort scan. Off by default. |
 | `verifyAfter` | Window after launch during which the patch is still considered "under verification". |
@@ -365,8 +365,8 @@ final map = patch.toJson();
 | --- | --- | --- | --- |
 | `version` | `String` | Yes | Patch identifier, an arbitrary string. |
 | `patchUrl` | `String` | Yes | Patch download URL. |
-| `md5` | `String` | No | Patch MD5 (lower-case 32-hex). An empty string skips MD5 verification (and signature verification along with it). |
-| `signature` | `String` | No | Ed25519 signature, base64. Empty disables signature verification. Only effective when `md5` is non-empty. |
+| `md5` | `String` | With a key or signature | Payload MD5 (lower-case 32-hex). Optional only when neither a public key nor signature is configured. |
+| `signature` | `String` | With a key | Ed25519 signature over the lowercase MD5 hex string's UTF-8 bytes, base64. Requires both `md5` and a configured public key. |
 | `targetVersionCode` | `int?` | Recommended | Host APK `versionCode` the patch is built for. |
 | `raw` | `Map<String, dynamic>` | No | Original fields preserved by `fromJson`. |
 
@@ -497,7 +497,7 @@ The outer `manifest.json` (consumed by `mock_server` for local testing and by yo
 | `key` | Flutter asset path as registered under `assets:` in `pubspec.yaml`. |
 | `variants` | Resolution-aware variants (`1.0x`, `2.0x`, etc.) auto-discovered from the patched APK's Flutter asset table. |
 
-During install (not cold start) the runtime merges these operations into the APK's baseline asset table, writes the merged table plus overlay files into the patch's private directory, and packages the result as a private `flutter_assets.apk`. At cold start [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) installs a patched `FlutterLoader` + `FlutterJNI` AssetManager that resolves Flutter asset reads to the patched directory; APK fallback still works for paths the patch didn't touch.
+During install the runtime merges these operations into the APK's baseline asset table, writes the merged table plus overlay files into the patch's private directory, and packages the result as a private `flutter_assets.apk`. Cold start recomputes the expected merged table in temporary verification storage and checks the installed artifacts before [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) installs a patched `FlutterLoader` + `FlutterJNI` AssetManager. Verification does not rewrite the installed asset directory or archive.
 
 ### Asset path requirements
 
@@ -528,9 +528,11 @@ The plugin returns `assetPackageInvalid` when the ZIP fails any of these checks 
 
 The outer MD5 / signature in the server's update response cover the whole `patch.zip`. Inner per-file MD5s are integrity checks during extraction, not a separate security surface — keep the outer signature mandatory in production.
 
+The installed patch retains the original ZIP for cold-start authentication, adding the ZIP size to local disk usage. With a configured key, missing MD5 or signature is rejected on every supported Android version (API 24+).
+
 ### When work happens
 
-`applyPatch` does the heavy lifting; cold start just validates and loads. Concretely:
+`applyPatch` builds the installed artifacts; cold start authenticates and verifies them before loading. Concretely:
 
 **During `applyPatch` (install time):**
 
@@ -538,12 +540,13 @@ The outer MD5 / signature in the server's update response cover the whole `patch
 2. Open the ZIP, validate inner `schemaVersion` and per-file MD5s.
 3. Extract `lib/<abi>/libapp.so` to staging.
 4. If the patch carries assets: copy the APK's `flutter_assets/` to staging, overlay each path listed in the inner manifest, merge the overlay operations into the asset table, and pack the result into a private `flutter_assets.apk`.
-5. Atomically commit the staged artifacts to `current/` (see [Architecture → Atomic install](architecture.md#atomic-install)).
+5. Retain the original ZIP separately, then atomically commit the staged artifacts (see [Architecture → Atomic install](architecture.md#atomic-install)).
 
 **On the next cold start:**
 
-1. Verify `current/` matches the host APK's `versionCode` and that the on-disk `libapp.so` still matches its meta MD5.
-2. [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) installs a patched `FlutterLoader` + `FlutterJNI` AssetManager that points Flutter at the patched `libapp.so` and (if assets are present) at the private `flutter_assets.apk`.
+1. Verify the host `versionCode` and the retained ZIP's MD5/signature, then compare the installed library's SHA-256 with the signed ZIP entry.
+2. For asset patches, derive the complete expected inventory from the signed ZIP and installed APKs, recompute the merged asset manifest in temporary verification storage, and compare SHA-256 hashes for both the merged files and the loaded `flutter_assets.apk` entries. These checks add startup I/O without replacing the installed artifacts.
+3. [`LoaderHook`](../android/src/main/kotlin/com/flutter_patcher/flutter_patcher/LoaderHook.kt) installs a patched `FlutterLoader` + `FlutterJNI` AssetManager that points Flutter at the patched `libapp.so` and (if assets are present) at the private `flutter_assets.apk`.
 
 If validation fails, or the in-process crash guard trips, the patch is dropped and the next cold start falls back to the APK's built-in version.
 
@@ -555,12 +558,12 @@ If validation fails, or the in-process crash guard trips, the patch is dropped a
 
 | Metric | Impact |
 | --- | --- |
-| APK size delta | ~80–120 KB |
-| Cold-start delta | ~5–15 ms |
-| Runtime memory | No additional resident footprint after patch load |
+| APK size delta | Includes Bouncy Castle; current release size delta is unmeasured |
+| Cold-start delta | ZIP authentication and artifact hashing; asset patches add complete inventory I/O. Current cost is unmeasured |
+| Runtime memory | Current verifier memory cost is unmeasured |
 | Patch file size | Typically 5–15 MB |
 
-> Numbers measured on Pixel 6 / Flutter 3.24. Real-world results vary with device, Flutter version, and build configuration.
+> Earlier Pixel 6 / Flutter 3.24 measurements do not cover the current verifier or asset-inventory checks. Measure the current release on target devices.
 
 ### Supported range
 

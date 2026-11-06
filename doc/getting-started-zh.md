@@ -40,13 +40,13 @@ if (check.hasUpdate) {
 
 ## 省略 MD5 校验
 
-`PatchInfo.md5` 是可选字段。若服务端协议不下发 md5（或你只想靠 HTTPS 防篡改），可省略：
+仅在未配置公钥且未提供签名的旧版无签名模式下，`PatchInfo.md5` 才可省略：
 
 ```dart
 PatchInfo(version: 'fix-1', patchUrl: '...', targetVersionCode: 100); // md5 默认空串
 ```
 
-此时下载完整性校验会被跳过。**注意签名校验也会一并跳过**（Ed25519 签名输入即 md5 hex，没有 md5 就没有签名输入）。要启用签名校验必须同时下发 md5。
+在无公钥模式下，未提供 MD5 和签名时会跳过下载 MD5 / 签名验证。配置公钥后必须同时提供非空 MD5 和签名，缺少任一字段都会拒绝补丁；提供签名也必须配置公钥并提供 MD5。全部受支持 Android 版本（API 24+）均通过 Bouncy Castle 验签。
 
 ---
 
