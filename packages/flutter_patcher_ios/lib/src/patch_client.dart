@@ -35,6 +35,7 @@ class PatchClient {
         throw const PatchException('PROTOCOL', 'Expected hasUpdate boolean');
       }
       final envelope = PatchEnvelope.fromJson(objectMap(json['patch']));
+      if (envelope.sha256 == store.active?.digest) return false;
       if (envelope.size <= 0 ||
           envelope.size > store.codec.limits.maxZipBytes) {
         throw const PatchException('LIMIT', 'Patch exceeds download limit');
