@@ -4,13 +4,14 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'asset_bundle.dart';
-import 'patch_runtime.dart';
+import 'runtime_contract.dart';
 
 /// Install once below MaterialApp's builder. Uncaught errors conservatively
 /// reject the selected patch and preserve prior Flutter/platform handlers.
 /// recoveryBuilder must use bundled resources and offer a user-driven restart.
 class PatchBootGuard extends StatefulWidget {
-  final PatchRuntime runtime;
+  final PatchExecution runtime;
+  final AssetBundle? assets, bundledAssets;
   final Widget child;
   final Widget Function(BuildContext, Object) recoveryBuilder;
   final Duration verifyAfter;
@@ -19,6 +20,8 @@ class PatchBootGuard extends StatefulWidget {
   const PatchBootGuard({
     super.key,
     required this.runtime,
+    this.assets,
+    this.bundledAssets,
     required this.child,
     required this.recoveryBuilder,
     this.verifyAfter = const Duration(seconds: 5),
@@ -31,7 +34,7 @@ class PatchBootGuard extends StatefulWidget {
 
 class _PatchBootGuardState extends State<PatchBootGuard>
     with WidgetsBindingObserver {
-  late final PatchAssetBundle _bundle;
+  late final AssetBundle _bundle, _bundledAssets;
   Timer? _timer;
   StreamSubscription<Object>? _errors;
   Duration _elapsed = Duration.zero;
@@ -45,10 +48,13 @@ class _PatchBootGuardState extends State<PatchBootGuard>
   @override
   void initState() {
     super.initState();
-    _bundle = PatchAssetBundle(
-      package: widget.runtime.store.active,
-      fallback: rootBundle,
-    );
+    _bundledAssets = widget.bundledAssets ?? rootBundle;
+    _bundle =
+        widget.assets ??
+        PatchAssetBundle(
+          package: widget.runtime.store.active,
+          fallback: _bundledAssets,
+        );
     if (!widget.runtime.hasPatch) return;
     _error = widget.runtime.failed
         ? StateError('Patch already failed; restart required')
@@ -138,7 +144,7 @@ class _PatchBootGuardState extends State<PatchBootGuard>
 
   @override
   Widget build(BuildContext context) => DefaultAssetBundle(
-    bundle: _error == null ? _bundle : rootBundle,
+    bundle: _error == null ? _bundle : _bundledAssets,
     child: _error == null
         ? widget.child
         : widget.recoveryBuilder(context, _error!),

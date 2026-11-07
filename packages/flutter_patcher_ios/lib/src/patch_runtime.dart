@@ -5,17 +5,22 @@ import 'package:dart_eval/dart_eval_security.dart';
 import 'package:flutter_eval/flutter_eval.dart';
 import 'models.dart';
 import 'patch_store.dart';
+import 'runtime_contract.dart';
 
 /// Executes only the authenticated, startup-selected local bytecode program.
 /// No global overrides, URL loaders, or blanket runtime permissions are used.
-class PatchRuntime {
+class PatchRuntime implements PatchExecution {
+  @override
   final PatchStore store;
   final Runtime? _runtime;
   final _errors = StreamController<Object>.broadcast();
   bool _failed = false, _disposed = false;
   PatchRuntime._(this.store, this._runtime);
+  @override
   bool get hasPatch => store.active != null;
+  @override
   bool get failed => _failed;
+  @override
   Stream<Object> get errors => _errors.stream;
   static Future<PatchRuntime> load(PatchStore store) async {
     final package = store.active;
@@ -103,6 +108,7 @@ class PatchRuntime {
     }
   }
 
+  @override
   Future<void> reportFailure(Object error) async {
     if (_failed || _disposed) return;
     _failed = true;
@@ -113,6 +119,7 @@ class PatchRuntime {
     }
   }
 
+  @override
   Future<void> dispose() async {
     _disposed = true;
     await _errors.close();

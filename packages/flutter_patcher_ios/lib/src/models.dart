@@ -5,7 +5,21 @@ const iosPatchRuntimeId = 'dart_eval-0.8.5/flutter_eval-0.8.2-fp.1';
 const iosDartModuleRuntimeId =
     'dart-ddm-v3/3f287915e06d8f802799c02c333da32e2b7d8dac';
 
-enum PatchProgramFormat { evc, dartBytecodeV3 }
+enum PatchProgramFormat {
+  evc,
+  dartBytecodeV3;
+
+  bool acceptsHeader(Uint8List program) {
+    if (program.length < 8) return false;
+    final header = ByteData.sublistView(program);
+    return switch (this) {
+      evc => header.getUint32(0) == 0x45564300 && header.getInt32(4) == 81,
+      dartBytecodeV3 =>
+        header.getUint32(0) == 0x33434244 &&
+            header.getUint32(4, Endian.little) == 3,
+    };
+  }
+}
 
 class PatchException implements Exception {
   final String code;

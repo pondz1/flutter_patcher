@@ -1,0 +1,6 @@
+The loading API and LICENSE are copied without modification from dart-lang/sdk
+revision 3b174b7217fe09b21da836ea623932b5f041b091:
+https://github.com/dart-lang/sdk/tree/3b174b7217fe09b21da836ea623932b5f041b091/pkg/dynamic_modules
+
+This package supplies the Dart API only. Executing bytecode requires the matching
+experimental engine; a standard Flutter release does not provide that runtime.

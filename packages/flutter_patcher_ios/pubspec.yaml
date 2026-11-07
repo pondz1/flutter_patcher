@@ -13,6 +13,8 @@ dependencies:
   crypto: ^3.0.7
   cryptography: ^2.7.0
   dart_eval: 0.8.5
+  dynamic_modules:
+    path: vendor/dynamic_modules
   flutter_eval:
     path: vendor/flutter_eval
   path_provider: ^2.1.5
