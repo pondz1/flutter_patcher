@@ -1,15 +1,68 @@
 # flutter_patcher_ios
 
-Experimental, self-hosted code and asset patches for **prepared Flutter
-entrypoints**, using a Dart bytecode interpreter. No hosted service or account
-is required. This is an optional companion in the flutter_patcher fork; the
-root package's Android AOT API and SDK constraints remain separate.
+Experimental, self-hosted code and asset updates with two explicit modes:
+complete application modules (`modules.dart`) and legacy prepared-entrypoint
+EVC interpretation (`flutter_patcher_ios.dart`). These formats and runtime IDs
+are deliberately distinct. The root package's Android AOT API is separate.
+Host-app build orchestration and backend integration are not included.
+**Physical iPhone release verification remains outstanding.**
 
-**Host-app and backend integration are not included. Physical iPhone release
-verification is outstanding.** Automated host tests exercise signed installation,
-serialized code execution, widgets, assets, networking, and rollback.
+## Complete application modules (DDM)
 
-## What can change
+`package:flutter_patcher_ios/modules.dart` exports `ModulePatchHost` and
+`ModulePatchRuntime` for one complete application module per isolate. Ordinary
+application Dart/Flutter code can change against the frozen host API; this does
+not replace bodies of functions already compiled into AOT.
+
+The base must use Flutter/engine source and DDM binaries pinned to
+`3f287915e06d8f802799c02c333da32e2b7d8dac`, with Dart revision
+`3b174b7217fe09b21da836ea623932b5f041b091`. The runtime ID is
+`dart-ddm-v3/3f287915e06d8f802799c02c333da32e2b7d8dac`, program format
+`dart-bytecode-v3`, and header bytes `3343424403000000`. The package accepts
+exactly `app.main` with no arguments. Legacy EVC bases cannot gain this engine
+through a patch; install a new native base first.
+
+Build an AOT bootstrap outside the application's sources, retaining dependency
+roots through a canonical dynamic interface. Freeze the matching **no-AOT**
+import kernel, interface, effective defines, compiler/engine identities, public
+keys and resolved dependency/native/plugin inputs. Compile application modules
+with the matching `dart2bytecode` compiler, `--import-dill` pointing to that frozen
+kernel, and `--validate` enabled. The actual native build must use the same
+interface, source/registrant identities and defines, plus DDM `gen_snapshot` and
+Flutter frameworks. Dependency or native changes require a new base.
+`bin/compile.dart` is the legacy EVC compiler; it does not compile DDM modules.
+`bin/pack.dart` accepts precompiled modules when config sets
+`"programFormat":"dart-bytecode-v3"` and the one `app.main` declaration.
+
+The isolated SDK must change `final AssetBundle rootBundle = _initRootBundle();`
+to `AssetBundle rootBundle = _initRootBundle();`. The bootstrap captures the
+original bundle, validates installed app identity against its code-signed public
+configuration, opens `ModulePatchHost` with explicit module format/trusted keys,
+then sets `rootBundle = host.assets` before `host.runApplication(baseProgramAsset)`.
+`ModulePatchHost.current` is available before application main. This covers normal
+root-bundle, image, JSON and `loadBuffer` access; native shader loader replacement
+is not promised. Code and assets remain one immutable generation until restart.
+
+Once module loading begins, never load a fallback or second module in the same
+isolate, even after a load error. Persist rejection and show bundled recovery UI;
+recovery requires a clean process restart. A clean isolate may run its code-signed
+bundled module if bootstrap fails before any module load.
+
+DDM executes trusted application code with the app's OS/native permissions and
+retained host APIs. **It is not the EVC permission sandbox described below.**
+Bundled module bytes are trusted through the native app signature; downloaded
+patches require the package's signature, inventory and exact host/runtime/API
+validation. Only sign code you authorize to run with the app's privileges.
+Simulator/native builds and host tests do not establish physical-device release
+acceptance or App Store approval.
+
+## Legacy EVC mode (unchanged)
+
+The remainder of this document describes the original dart_eval/flutter_eval
+prepared-entrypoint mode only. Its subset, explicit bridges and permission
+boundary do not describe complete application modules.
+
+### What can change
 
 - Supported Dart functions and widgets that the base app explicitly invokes
   through `PatchRuntime`.
@@ -22,7 +75,7 @@ interpretable. The initial API accepts primitive/JSON arguments; existing native
 SDKs, plugin changes, app icons, launch screens, and Flutter upgrades require a
 new full release. The interpreter supports only a subset of Dart/Flutter.
 
-## Install in a future host app
+### Install in a future host app
 
 ```yaml
 dependencies:
@@ -54,7 +107,7 @@ Use the same flag for other release targets that include this companion.
 This preserves the full icon fonts needed by future patches. The ordinary
 release command without the flag fails Flutter's icon-tree-shaker check.
 
-## Bootstrap and explicit entrypoints
+### Bootstrap and explicit entrypoints
 
 ```dart
 import 'dart:convert';
@@ -126,7 +179,7 @@ conservatively rejects the selected patch on uncaught errors while mounted,
 including deferred UI callbacks. Recovery UI must use bundled resources.
 Install only one guard/runtime for a process.
 
-## Compile and pack on your machine or CI
+### Compile and pack on your machine or CI
 
 Run tools from a **source checkout of this companion package**, not inside an
 installed dependency's pub cache. `flutter_test` is a developer dependency used
@@ -174,7 +227,7 @@ Never upload the private seed. The packer verifies its own output with the same
 consumer verifier before committing release artifacts. It does not upload or
 publish anything.
 
-## Self-hosted delivery
+### Self-hosted delivery
 
 Upload `patch.zip` and serve `check.json` from your own HTTPS server or CDN.
 For no update, serve `{"hasUpdate":false}`. For an update, serve
@@ -200,7 +253,7 @@ loopback HTTP is available only with `allowLocalHttp: true` for testing.
 This package does not implement an application backend. A host integration
 must keep forced native/full-app upgrades distinct from Dart patches.
 
-## Assets and recovery
+### Assets and recovery
 
 Use `PatchAssetBundle(package: store.active, fallback: rootBundle)` explicitly for
 non-widget loads. `DefaultAssetBundle.of(context)` and `Image.asset` beneath the
@@ -236,7 +289,7 @@ a new iOS schema; Android schema-2 ZIPs and raw
 `libapp.so` are rejected. Signed delivery does not itself guarantee App Store
 acceptance of every update or usage.
 
-## Verification
+### Verification
 
 ```sh
 flutter analyze --no-pub

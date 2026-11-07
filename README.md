@@ -2,13 +2,21 @@
 
 ## iOS support in this fork
 
-This fork includes an optional experimental companion,
-[`flutter_patcher_ios`](packages/flutter_patcher_ios/README.md), for self-hosted
-signed Dart bytecode and asset updates on prepared Flutter entrypoints. It is
-separate from the Android AOT API documented below. It requires shipping an
-interpreter in the base app and does not patch arbitrary existing AOT code.
-Physical iPhone release verification remains outstanding. Host-app and backend
-integration are outside this package.
+This fork includes the optional experimental
+[`flutter_patcher_ios`](packages/flutter_patcher_ios/README.md) companion with two
+explicit modes: complete application modules through `modules.dart` on a pinned
+DDM-enabled Flutter base, and legacy EVC patches for prepared entrypoints. Both
+select signed code and assets on a cold start; their formats and host contracts
+are distinct. The Android AOT API below remains separate.
+
+Full application modules require engine/source revision
+`3f287915e06d8f802799c02c333da32e2b7d8dac`, matching compiler/framework binaries,
+a frozen dependency interface and no-AOT import kernel, and a startup-mutable
+SDK `rootBundle`. They load trusted application code with the app's native API
+permissions; **DDM is not the legacy EVC permission sandbox**. Physical iPhone
+release verification remains outstanding, and native build success does not
+establish patch acceptance or App Store approval. Host-app build orchestration
+and backend integration remain outside the generic package.
 
 **English** | [简体中文](README-zh.md)
 
@@ -37,7 +45,7 @@ If you've used [Shorebird](https://shorebird.dev/), [CodePush](https://learn.mic
 | Cost           | Free (MIT)               | Free tier + paid plans        | —                             |
 | Self-hostable  | Yes — full control       | Cloud-managed                 | —                             |
 
-For iOS in this fork, see the [optional interpreter companion](packages/flutter_patcher_ios/README.md) and its explicit patch-scope restrictions. The Android package documented here provides self-hosted OTA updates on infrastructure you control.
+For iOS in this fork, see the [optional iOS companion](packages/flutter_patcher_ios/README.md) and its separate module and legacy patch contracts. The Android package documented here provides self-hosted OTA updates on infrastructure you control.
 
 > Google Play and some stores restrict downloading executable code at runtime. flutter_patcher targets self-controlled, enterprise, or permissive distribution channels. Check your channel's policy before shipping.
 
