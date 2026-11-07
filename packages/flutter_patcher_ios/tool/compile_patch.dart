@@ -12,6 +12,13 @@ void main() {
     }
     final configFile = File(path).absolute;
     final config = objectMap(jsonDecode(await configFile.readAsString()));
+    if (config.containsKey('programFormat') &&
+        config['programFormat'] != 'evc-v81') {
+      throw const PatchException(
+        'COMPILE',
+        'The EVC compiler only supports evc-v81',
+      );
+    }
     final sources = <String, Map<String, String>>{};
     for (final package in objectMap(config['sources']).entries) {
       if (!RegExp(r'^[a-z][a-z0-9_]*$').hasMatch(package.key)) {

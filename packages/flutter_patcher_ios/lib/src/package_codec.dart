@@ -136,9 +136,17 @@ class PatchPackageCodec {
       );
     }
     final manifest = objectMap(jsonDecode(utf8.decode(manifestBytes)));
+    final format = manifest.containsKey('programFormat')
+        ? manifest['programFormat']
+        : 'evc-v81';
+    final expectedFormat = switch (host.programFormat) {
+      PatchProgramFormat.evc => 'evc-v81',
+      PatchProgramFormat.dartBytecodeV3 => 'dart-bytecode-v3',
+    };
     if (manifest['schemaVersion'] != 1 ||
         manifest['platform'] != 'ios' ||
-        manifest['runtimeId'] != iosPatchRuntimeId ||
+        format != expectedFormat ||
+        manifest['runtimeId'] != host.runtimeId ||
         manifest['version'] != envelope.version) {
       throw const PatchException(
         'INCOMPATIBLE',
@@ -180,16 +188,32 @@ class PatchPackageCodec {
       throw const PatchException('INVALID_PACKAGE', 'Missing bytecode program');
     }
     final bytecode = files[program]!;
-    if (bytecode.length < 8 ||
-        ByteData.sublistView(bytecode).getUint32(0) != 0x45564300 ||
-        ByteData.sublistView(bytecode).getInt32(4) != 81) {
+    final header = bytecode.length < 8 ? null : ByteData.sublistView(bytecode);
+    final validHeader =
+        header != null &&
+        switch (host.programFormat) {
+          PatchProgramFormat.evc =>
+            header.getUint32(0) == 0x45564300 && header.getInt32(4) == 81,
+          PatchProgramFormat.dartBytecodeV3 =>
+            header.getUint32(0) == 0x33434244 &&
+                header.getUint32(4, Endian.little) == 3,
+        };
+    if (!validHeader) {
       throw const PatchException(
         'INCOMPATIBLE',
-        'Invalid EVC header or bytecode version',
+        'Invalid program header or bytecode version',
+      );
+    }
+    final declarations = objectMap(manifest['entrypoints']);
+    if (host.programFormat == PatchProgramFormat.dartBytecodeV3 &&
+        (declarations.length != 1 || !declarations.containsKey('app.main'))) {
+      throw const PatchException(
+        'INCOMPATIBLE',
+        'Module requires only app.main',
       );
     }
     final entrypoints = <String, PatchEntrypoint>{};
-    for (final entry in objectMap(manifest['entrypoints']).entries) {
+    for (final entry in declarations.entries) {
       if (!host.entrypoints.contains(entry.key)) {
         throw PatchException(
           'INCOMPATIBLE',
@@ -197,13 +221,24 @@ class PatchPackageCodec {
         );
       }
       final spec = objectMap(entry.value);
-      final modes = spec['argumentModes'] ?? const <String>[];
+      final modes = host.programFormat == PatchProgramFormat.dartBytecodeV3
+          ? (spec.containsKey('argumentModes')
+                ? spec['argumentModes']
+                : const <String>[])
+          : spec['argumentModes'] ?? const <String>[];
       if (modes is! List ||
           modes.length > 64 ||
           modes.any((v) => v != 'raw' && v != 'boxed' && v != 'list')) {
         throw const PatchException(
           'INVALID_PACKAGE',
           'Invalid entrypoint argument modes',
+        );
+      }
+      if (host.programFormat == PatchProgramFormat.dartBytecodeV3 &&
+          modes.isNotEmpty) {
+        throw const PatchException(
+          'INCOMPATIBLE',
+          'Module main takes no arguments',
         );
       }
       entrypoints[entry.key] = PatchEntrypoint(
@@ -241,6 +276,7 @@ class PatchPackageCodec {
       assetPaths: assets,
       files: files,
       programPath: program,
+      programFormat: host.programFormat,
     );
   }
 }

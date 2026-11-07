@@ -2,6 +2,10 @@ import 'dart:typed_data';
 
 /// Compiler and runtime must use exactly this bridge/bytecode combination.
 const iosPatchRuntimeId = 'dart_eval-0.8.5/flutter_eval-0.8.2-fp.1';
+const iosDartModuleRuntimeId =
+    'dart-ddm-v3/3f287915e06d8f802799c02c333da32e2b7d8dac';
+
+enum PatchProgramFormat { evc, dartBytecodeV3 }
 
 class PatchException implements Exception {
   final String code;
@@ -24,13 +28,19 @@ class PatchLimits {
 class PatchHost {
   final String appId, version, buildNumber, apiId;
   final Set<String> entrypoints;
+  final PatchProgramFormat programFormat;
   const PatchHost({
     required this.appId,
     required this.version,
     required this.buildNumber,
     required this.apiId,
     required this.entrypoints,
+    this.programFormat = PatchProgramFormat.evc,
   });
+  String get runtimeId => switch (programFormat) {
+    PatchProgramFormat.evc => iosPatchRuntimeId,
+    PatchProgramFormat.dartBytecodeV3 => iosDartModuleRuntimeId,
+  };
   Map<String, dynamic> toJson() => {
     'appId': appId,
     'version': version,
@@ -86,6 +96,7 @@ class PatchPackage {
   final Map<String, String> assetPaths;
   final Map<String, Uint8List> _files;
   final String programPath;
+  final PatchProgramFormat programFormat;
   PatchPackage({
     required this.version,
     required this.digest,
@@ -93,6 +104,7 @@ class PatchPackage {
     required Map<String, String> assetPaths,
     required Map<String, Uint8List> files,
     required this.programPath,
+    this.programFormat = PatchProgramFormat.evc,
   }) : entrypoints = Map.unmodifiable(entrypoints),
        assetPaths = Map.unmodifiable(assetPaths),
        _files = Map.unmodifiable(

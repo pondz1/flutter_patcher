@@ -55,6 +55,33 @@ void main() {
     );
   }
 
+  test(
+    'EVC runtime refuses an authenticated module without rejecting it',
+    () async {
+      final p = await moduleFixture();
+      store = await PatchStore.open(
+        directory: dir,
+        host: moduleHost,
+        trustedKeys: {'test': await publicKey()},
+      );
+      await store!.install(p.bytes, p.envelope);
+      await store!.close();
+      store = await PatchStore.open(
+        directory: dir,
+        host: moduleHost,
+        trustedKeys: {'test': await publicKey()},
+      );
+      await expectLater(
+        PatchRuntime.load(store!),
+        throwsA(
+          isA<PatchException>().having((e) => e.code, 'code', 'INCOMPATIBLE'),
+        ),
+      );
+      expect(store!.blacklist, isEmpty);
+      expect(store!.active!.program, moduleProgram);
+    },
+  );
+
   testWidgets('loads installed serialized bytecode and renders changed widget', (
     tester,
   ) async {

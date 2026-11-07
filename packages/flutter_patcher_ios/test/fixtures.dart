@@ -12,6 +12,44 @@ const testHost = PatchHost(
   apiId: 'test-api-1',
   entrypoints: {'title', 'view'},
 );
+const moduleHost = PatchHost(
+  appId: 'test.app',
+  version: '1.0.0',
+  buildNumber: '53.1',
+  apiId: 'test-api-1',
+  entrypoints: {'app.main'},
+  programFormat: PatchProgramFormat.dartBytecodeV3,
+);
+final moduleProgram = Uint8List.fromList([
+  0x33,
+  0x43,
+  0x42,
+  0x44,
+  3,
+  0,
+  0,
+  0,
+  17,
+  23,
+]);
+Future<({Uint8List bytes, PatchEnvelope envelope})> moduleFixture({
+  Map<String, dynamic>? overrides,
+  Uint8List? program,
+}) => fixture(
+  program: program ?? moduleProgram,
+  overrides: {
+    'programFormat': 'dart-bytecode-v3',
+    'runtimeId': 'dart-ddm-v3/3f287915e06d8f802799c02c333da32e2b7d8dac',
+    'entrypoints': {
+      'app.main': {
+        'library': 'package:app/main.dart',
+        'function': 'main',
+        'argumentModes': [],
+      },
+    },
+    ...?overrides,
+  },
+);
 final testSeed = List<int>.generate(32, (i) => i);
 Future<List<int>> publicKey() async =>
     (await (await Ed25519().newKeyPairFromSeed(

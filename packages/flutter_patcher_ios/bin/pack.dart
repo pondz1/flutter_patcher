@@ -66,7 +66,19 @@ Future<void> main(List<String> arguments) async {
       files[key] = await file.readAsBytes();
     }
 
-    await read('code/patch.evc', requiredString(config, 'program'));
+    final formatName = config.containsKey('programFormat')
+        ? config['programFormat']
+        : 'evc-v81';
+    final format = switch (formatName) {
+      'evc-v81' => PatchProgramFormat.evc,
+      'dart-bytecode-v3' => PatchProgramFormat.dartBytecodeV3,
+      _ => throw const FormatException('Unsupported programFormat'),
+    };
+    final programPath = format == PatchProgramFormat.evc
+        ? 'code/patch.evc'
+        : 'code/patch.dill';
+    // Both formats arrive already compiled. Module bytes never enter EVC tools.
+    await read(programPath, requiredString(config, 'program'));
     final assets = <String, String>{};
     for (final asset in objectMap(config['assets']).entries) {
       validatePatchPath(asset.key);
@@ -85,14 +97,16 @@ Future<void> main(List<String> arguments) async {
       buildNumber: requiredString(hostJson, 'buildNumber'),
       apiId: requiredString(hostJson, 'apiId'),
       entrypoints: entries.keys.toSet(),
+      programFormat: format,
     );
     final manifest = {
       'schemaVersion': 1,
       'platform': 'ios',
       'version': requiredString(config, 'version'),
-      'runtimeId': iosPatchRuntimeId,
+      'runtimeId': host.runtimeId,
+      if (config.containsKey('programFormat')) 'programFormat': formatName,
       'host': host.toJson(),
-      'program': 'code/patch.evc',
+      'program': programPath,
       'entrypoints': entries,
       'assets': assets,
       'files': {

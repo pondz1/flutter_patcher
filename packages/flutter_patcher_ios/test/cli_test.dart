@@ -9,6 +9,98 @@ import 'package:flutter_patcher_ios/compiler.dart';
 import 'fixtures.dart';
 
 void main() {
+  test(
+    'EVC compile CLI preserves module bytes when given a module config',
+    () async {
+      final dir = await Directory.systemTemp.createTemp(
+        'patch-module-compile-',
+      );
+      addTearDown(() => dir.delete(recursive: true));
+      await File('${dir.path}/app.dill').writeAsBytes(moduleProgram);
+      await File('${dir.path}/main.dart').writeAsString('void main() {}');
+      await File('${dir.path}/patch.json').writeAsString(
+        jsonEncode({
+          'programFormat': 'dart-bytecode-v3',
+          'program': 'app.dill',
+          'sources': {
+            'app': {'main.dart': 'main.dart'},
+          },
+        }),
+      );
+      final result = await Process.run('dart', [
+        '--packages=.dart_tool/package_config.json',
+        'bin/compile.dart',
+        '--config',
+        '${dir.path}/patch.json',
+      ]);
+      expect(
+        result.exitCode,
+        isNot(0),
+        reason: '${result.stdout}\n${result.stderr}',
+      );
+      expect(await File('${dir.path}/app.dill').readAsBytes(), moduleProgram);
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
+  test(
+    'pack CLI signs an already compiled Dart module without EVC compilation',
+    () async {
+      final dir = await Directory.systemTemp.createTemp('patch-module-cli-');
+      addTearDown(() => dir.delete(recursive: true));
+      final module = [0x33, 0x43, 0x42, 0x44, 3, 0, 0, 0, 17, 23];
+      await File('${dir.path}/app.dill').writeAsBytes(module);
+      await File(
+        '${dir.path}/private.seed',
+      ).writeAsString(base64Encode(testSeed));
+      await File('${dir.path}/patch.json').writeAsString(
+        jsonEncode({
+          'version': 'module-1',
+          'host': testHost.toJson(),
+          'programFormat': 'dart-bytecode-v3',
+          'program': 'app.dill',
+          // Invalid EVC sources must never be read or compiled by the packer.
+          'sources': {
+            'app': {'main.dart': 'does-not-exist.dart'},
+          },
+          'entrypoints': {
+            'app.main': {
+              'library': 'package:app/main.dart',
+              'function': 'main',
+              'argumentModes': [],
+            },
+          },
+          'assets': <String, String>{},
+        }),
+      );
+      final result = await Process.run('dart', [
+        '--packages=.dart_tool/package_config.json',
+        'bin/pack.dart',
+        '--config',
+        '${dir.path}/patch.json',
+        '--seed',
+        '${dir.path}/private.seed',
+        '--key-id',
+        'test',
+        '--url',
+        'https://cdn.invalid/module.zip',
+        '--out',
+        '${dir.path}/dist',
+      ]);
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      final bytes = await File('${dir.path}/dist/patch.zip').readAsBytes();
+      final envelope = PatchEnvelope.fromJson(
+        jsonDecode(await File('${dir.path}/dist/envelope.json').readAsString()),
+      );
+      expect(envelope.version, 'module-1');
+      final package = await PatchPackageCodec(
+        host: moduleHost,
+        trustedKeys: {'test': await publicKey()},
+      ).verify(bytes, envelope);
+      expect(package.program, module);
+      expect(package.programFormat, PatchProgramFormat.dartBytecodeV3);
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
   test('pack CLI produces installable signed executable patch', () async {
     final dir = await Directory.systemTemp.createTemp('patch-cli-');
     addTearDown(() => dir.delete(recursive: true));

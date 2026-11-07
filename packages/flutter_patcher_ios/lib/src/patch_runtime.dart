@@ -20,6 +20,12 @@ class PatchRuntime {
   static Future<PatchRuntime> load(PatchStore store) async {
     final package = store.active;
     if (package == null) return PatchRuntime._(store, null);
+    if (package.programFormat != PatchProgramFormat.evc) {
+      throw const PatchException(
+        'INCOMPATIBLE',
+        'EVC runtime cannot load a Dart module',
+      );
+    }
     try {
       final runtime = Runtime(ByteData.sublistView(package.program))
         ..addPlugin(flutterEvalPlugin);
